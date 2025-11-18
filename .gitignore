@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Jupyter
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ============================================
+# BÜYÜK DOSYALAR - GİTHUB'A PUSHLANMAYACAK
+# ============================================
+
+# Model dosyaları (Hugging Face'ten indirilecek)
+models/
+*.pth
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+
+# Dataset cache (Hugging Face otomatik indirir)
+data/cache/
+data/*.arrow
+
+# Checkpoints (Google Drive'da tutulacak)
+checkpoints/
+runs/
+outputs/
+
+# Log dosyaları
+*.log
+*.out
+
+# Geçici dosyalar
+*.tmp
+.cache/
+tmp/
+
+# Phoneme vocab (ilk çalışmada oluşturulur)
+data/phoneme_vocab.json

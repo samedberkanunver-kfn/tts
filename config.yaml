@@ -1,0 +1,207 @@
+# Turkish StyleTTS2 Fine-Tuning Configuration
+# Optimized for Apple Silicon (MacBook Pro M4)
+
+# ============================================================================
+# DATA CONFIGURATION
+# ============================================================================
+data:
+  # Dataset from Hugging Face
+  dataset_name: "zeynepgulhan/mediaspeech-with-cv-tr"
+
+  # Audio specifications (StyleTTS2 standard)
+  sample_rate: 24000
+
+  # Mel-spectrogram parameters
+  n_fft: 2048
+  hop_length: 300
+  win_length: 1200
+  n_mels: 80
+  mel_fmin: 0
+  mel_fmax: 8000
+
+  # Data filtering
+  filter_min_words: 3    # Minimum words in sentence
+  filter_max_words: 20   # Maximum words in sentence
+  filter_min_duration: 0.5   # Minimum audio duration (seconds)
+  filter_max_duration: 15.0  # Maximum audio duration (seconds)
+
+  # Train/validation split
+  train_split_ratio: 0.8
+  validation_split_ratio: 0.2
+
+  # Data paths
+  data_dir: "./data"
+  cache_dir: "./data/cache"
+
+# ============================================================================
+# PHONEMIZER CONFIGURATION
+# ============================================================================
+phonemizer:
+  # Backend: espeak-ng (requires: brew install espeak-ng)
+  backend: "espeak-ng"
+  language: "tr"  # Turkish
+  preserve_punctuation: true
+  with_stress: true
+
+  # Phoneme vocabulary will be built from training data
+  phoneme_vocab_path: "./data/phoneme_vocab.json"
+
+# ============================================================================
+# MODEL CONFIGURATION
+# ============================================================================
+model:
+  # Model architecture (will use StyleTTS2 from GitHub or custom implementation)
+  architecture: "styletts2"
+
+  # Model dimensions
+  hidden_dim: 512
+  n_layer: 8
+
+  # Text encoder
+  max_seq_len: 200  # Maximum phoneme sequence length
+
+  # Audio encoder/decoder
+  encoder_dim: 512
+  decoder_dim: 512
+
+  # Multi-speaker support (mediaspeech-with-cv-tr is multi-speaker)
+  multi_speaker: true
+  n_speakers: null  # Will be auto-detected from dataset
+  speaker_embed_dim: 256
+
+# ============================================================================
+# LORA CONFIGURATION (PEFT)
+# ============================================================================
+lora:
+  # LoRA parameters (from plan.md)
+  r: 8              # LoRA rank
+  lora_alpha: 16    # LoRA alpha (typically 2x rank)
+  lora_dropout: 0.1
+
+  # Target modules (attention layers in transformer)
+  target_modules:
+    - "q_proj"
+    - "v_proj"
+    - "k_proj"
+    - "o_proj"
+
+  # PEFT-specific settings
+  use_rslora: true   # Rank-stabilized LoRA (recommended)
+  use_dora: false    # DoRA (more parameters, better at low rank)
+  bias: "none"       # Don't train bias terms
+
+  # LoRA checkpoint path
+  lora_checkpoint_dir: "./checkpoints/lora"
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # Device configuration (Apple Silicon)
+  device: "mps"  # Use Metal Performance Shaders
+
+  # Batch configuration (optimized for M4 with limited memory)
+  batch_size: 2
+  gradient_accumulation_steps: 16  # Effective batch size: 2 * 16 = 32
+
+  # Optimization
+  optimizer: "AdamW"
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  betas: [0.8, 0.999]
+  eps: 1.0e-8
+
+  # Learning rate scheduling
+  scheduler: "linear"  # or "cosine", "constant"
+  warmup_steps: 4000
+
+  # Mixed precision (FP16 on MPS)
+  mixed_precision: true
+  fp16: true
+  bf16: false  # BF16 not supported on Apple Silicon
+
+  # Gradient clipping
+  max_grad_norm: 5.0
+
+  # Training duration
+  num_epochs: 100
+  max_steps: null  # If set, overrides num_epochs
+
+  # Loss configuration
+  loss_type: "l1"  # "l1" or "mse" for mel-spectrogram
+
+  # Early stopping
+  early_stopping: true
+  patience: 10  # Epochs without improvement before stopping
+  min_delta: 0.001  # Minimum change to qualify as improvement
+
+  # Logging
+  log_interval: 100  # Log every N steps
+  eval_interval: 1000  # Evaluate every N steps
+
+  # Checkpointing
+  save_interval: 1000  # Save checkpoint every N steps
+  checkpoint_dir: "./checkpoints"
+  keep_last_n_checkpoints: 3  # Only keep last 3 checkpoints to save space
+
+  # Resume training
+  resume_from_checkpoint: null  # Path to checkpoint to resume from
+
+  # TensorBoard logging
+  use_tensorboard: true
+  tensorboard_dir: "./runs"
+
+  # Weights & Biases (optional)
+  use_wandb: false
+  wandb_project: "turkish-styletts2"
+  wandb_run_name: null  # Auto-generated if null
+
+# ============================================================================
+# VALIDATION/EVALUATION CONFIGURATION
+# ============================================================================
+validation:
+  # Validation set size
+  val_batch_size: 4
+
+  # Metrics to compute
+  compute_mcd: false  # Mel Cepstral Distortion (expensive)
+  compute_mel_loss: true
+
+  # Generate audio samples during validation
+  generate_samples: true
+  n_samples_to_generate: 5
+  sample_texts:
+    - "Merhaba, size nasıl yardımcı olabilirim?"
+    - "Bugün hava çok güzel."
+    - "Türkçe metin seslendirilmesi çalışıyor."
+    - "Bu bir test cümlesidir."
+    - "Yapay zeka teknolojileri gelişiyor."
+
+# ============================================================================
+# INFERENCE CONFIGURATION
+# ============================================================================
+inference:
+  # Generation parameters
+  temperature: 0.7
+  top_k: 50
+  top_p: 0.95
+
+  # Audio output
+  output_dir: "./outputs"
+  output_format: "wav"  # or "mp3", "flac"
+
+# ============================================================================
+# SYSTEM CONFIGURATION
+# ============================================================================
+system:
+  # Random seed for reproducibility
+  seed: 42
+
+  # Number of workers for data loading
+  num_workers: 4  # For Apple Silicon, 4 is usually good
+
+  # Pin memory (not applicable for MPS, use False)
+  pin_memory: false
+
+  # Deterministic mode (may be slower)
+  deterministic: false
