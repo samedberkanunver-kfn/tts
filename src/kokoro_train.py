@@ -86,8 +86,7 @@ class KokoroTurkishDataset(Dataset):
         print(f"Loading dataset ({split})...")
         dataset = load_dataset(
             "zeynepgulhan/mediaspeech-with-cv-tr",
-            split=split,
-            trust_remote_code=True
+            split=split
         )
 
         # Limit samples
