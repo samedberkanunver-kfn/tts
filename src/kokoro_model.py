@@ -206,14 +206,7 @@ class KokoroModel(nn.Module):
         # d is (B, hidden, T) -> permute to (B, T, hidden) for repeat
         d_perm = d.permute(0, 2, 1)
         # t_en is (B, hidden, T) -> permute to (B, T, hidden)
-        t_en_perm = t_en.permute(0, 2, 1) # t_en was (B, hidden, T) from text_encoder? 
-        # Wait, text_encoder output shape check:
-        # self.text_encoder(input_ids, ...) -> (B, hidden, T) usually.
-        # Let's verify text_encoder in modules.py if possible, but assuming (B, hidden, T) based on usage.
-        # In original code: t_en = self.text_encoder(...) 
-        # asr = t_en @ pred_aln_trg
-        # pred_aln_trg was (1, T, T_mel). 
-        # So t_en must be (B, hidden, T). Correct.
+        t_en_perm = t_en.permute(0, 2, 1)
 
         max_mel_len = int(pred_dur.sum(dim=1).max().item())
         
@@ -223,20 +216,17 @@ class KokoroModel(nn.Module):
         pred_dur_cpu = pred_dur.cpu()
         
         for i in range(batch_size):
-            # Get the actual sequence length for this batch item
-            seq_len = d_perm[i].size(0)
+            # Use the actual input length for this batch item
+            actual_len = input_lengths[i].item()
             
-            # Slice pred_dur to match the sequence length
-            dur = pred_dur_cpu[i, :seq_len]  # (seq_len,)
-            
-            # Ensure dur and d_perm[i] have matching lengths
-            if dur.size(0) != d_perm[i].size(0):
-                # Skip this batch item if dimensions still don't match
-                continue
+            # Slice to actual length
+            dur = pred_dur_cpu[i, :actual_len]  # (actual_len,)
+            d_slice = d_perm[i, :actual_len, :]  # (actual_len, hidden)
+            t_en_slice = t_en_perm[i, :actual_len, :]  # (actual_len, hidden)
             
             # Repeat features based on duration
-            curr_en = torch.repeat_interleave(d_perm[i], dur, dim=0)  # (T_mel_i, hidden)
-            curr_asr = torch.repeat_interleave(t_en_perm[i], dur, dim=0)  # (T_mel_i, hidden)
+            curr_en = torch.repeat_interleave(d_slice, dur, dim=0)  # (T_mel_i, hidden)
+            curr_asr = torch.repeat_interleave(t_en_slice, dur, dim=0)  # (T_mel_i, hidden)
             
             # Pad to max_mel_len
             pad_len = max_mel_len - curr_en.size(0)
@@ -246,10 +236,6 @@ class KokoroModel(nn.Module):
                 
             en_list.append(curr_en)
             asr_list.append(curr_asr)
-        
-        # If all batch items were skipped, raise an error
-        if len(en_list) == 0:
-            raise RuntimeError("All batch items had dimension mismatches")
             
             
         # Stack and permute back to (B, hidden, T_mel)
