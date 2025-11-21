@@ -213,14 +213,12 @@ class KokoroModel(nn.Module):
         en_list = []
         asr_list = []
         
-        pred_dur_cpu = pred_dur.cpu()
-        
         for i in range(batch_size):
             # Use the actual input length for this batch item
             actual_len = input_lengths[i].item()
             
-            # Slice to actual length
-            dur = pred_dur_cpu[i, :actual_len]  # (actual_len,)
+            # Slice to actual length (keep on GPU)
+            dur = pred_dur[i, :actual_len]  # (actual_len,) - keep on GPU
             d_slice = d_perm[i, :actual_len, :]  # (actual_len, hidden)
             t_en_slice = t_en_perm[i, :actual_len, :]  # (actual_len, hidden)
             
@@ -236,6 +234,7 @@ class KokoroModel(nn.Module):
                 
             en_list.append(curr_en)
             asr_list.append(curr_asr)
+            
             
             
         # Stack and permute back to (B, hidden, T_mel)
