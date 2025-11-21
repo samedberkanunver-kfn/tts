@@ -223,12 +223,20 @@ class KokoroModel(nn.Module):
         pred_dur_cpu = pred_dur.cpu()
         
         for i in range(batch_size):
-            dur = pred_dur_cpu[i] # (T,)
+            # Get the actual sequence length for this batch item
+            seq_len = d_perm[i].size(0)
+            
+            # Slice pred_dur to match the sequence length
+            dur = pred_dur_cpu[i, :seq_len]  # (seq_len,)
+            
+            # Ensure dur and d_perm[i] have matching lengths
+            if dur.size(0) != d_perm[i].size(0):
+                # Skip this batch item if dimensions still don't match
+                continue
             
             # Repeat features based on duration
-            # d_perm[i] is (T, hidden)
-            curr_en = torch.repeat_interleave(d_perm[i], dur, dim=0) # (T_mel_i, hidden)
-            curr_asr = torch.repeat_interleave(t_en_perm[i], dur, dim=0) # (T_mel_i, hidden)
+            curr_en = torch.repeat_interleave(d_perm[i], dur, dim=0)  # (T_mel_i, hidden)
+            curr_asr = torch.repeat_interleave(t_en_perm[i], dur, dim=0)  # (T_mel_i, hidden)
             
             # Pad to max_mel_len
             pad_len = max_mel_len - curr_en.size(0)
@@ -238,6 +246,11 @@ class KokoroModel(nn.Module):
                 
             en_list.append(curr_en)
             asr_list.append(curr_asr)
+        
+        # If all batch items were skipped, raise an error
+        if len(en_list) == 0:
+            raise RuntimeError("All batch items had dimension mismatches")
+            
             
         # Stack and permute back to (B, hidden, T_mel)
         en = torch.stack(en_list).permute(0, 2, 1).to(self.device)
