@@ -193,28 +193,54 @@ class KokoroModel(nn.Module):
         duration = torch.sigmoid(duration).sum(axis=-1) / speed
         pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
 
-        # Create alignment (MPS workaround: run repeat_interleave on CPU)
-        pred_dur_cpu = pred_dur.cpu()
-        indices = torch.repeat_interleave(
-            torch.arange(input_ids.shape[1]),
-            pred_dur_cpu
-        ).to(self.device)
-        pred_aln_trg = torch.zeros(
-            (input_ids.shape[1], indices.shape[0]),
-            device=self.device
-        )
-        pred_aln_trg[indices, torch.arange(indices.shape[0])] = 1
-        pred_aln_trg = pred_aln_trg.unsqueeze(0).to(self.device)
+        # Batch alignment (Loop approach to handle variable durations per batch item)
+        # This replaces the matrix multiplication approach which failed for batch_size > 1
+        
+        # Text encoder
+        t_en = self.text_encoder(input_ids, input_lengths, text_mask)
+        
+        # d is (B, hidden, T) -> permute to (B, T, hidden) for repeat
+        d_perm = d.permute(0, 2, 1)
+        # t_en is (B, hidden, T) -> permute to (B, T, hidden)
+        t_en_perm = t_en.permute(0, 2, 1) # t_en was (B, hidden, T) from text_encoder? 
+        # Wait, text_encoder output shape check:
+        # self.text_encoder(input_ids, ...) -> (B, hidden, T) usually.
+        # Let's verify text_encoder in modules.py if possible, but assuming (B, hidden, T) based on usage.
+        # In original code: t_en = self.text_encoder(...) 
+        # asr = t_en @ pred_aln_trg
+        # pred_aln_trg was (1, T, T_mel). 
+        # So t_en must be (B, hidden, T). Correct.
 
-        # Text encoding with alignment
-        en = d.transpose(-1, -2) @ pred_aln_trg
+        max_mel_len = int(pred_dur.sum(dim=1).max().item())
+        
+        en_list = []
+        asr_list = []
+        
+        pred_dur_cpu = pred_dur.cpu()
+        
+        for i in range(batch_size):
+            dur = pred_dur_cpu[i] # (T,)
+            
+            # Repeat features based on duration
+            # d_perm[i] is (T, hidden)
+            curr_en = torch.repeat_interleave(d_perm[i], dur, dim=0) # (T_mel_i, hidden)
+            curr_asr = torch.repeat_interleave(t_en_perm[i], dur, dim=0) # (T_mel_i, hidden)
+            
+            # Pad to max_mel_len
+            pad_len = max_mel_len - curr_en.size(0)
+            if pad_len > 0:
+                curr_en = F.pad(curr_en, (0, 0, 0, pad_len))
+                curr_asr = F.pad(curr_asr, (0, 0, 0, pad_len))
+                
+            en_list.append(curr_en)
+            asr_list.append(curr_asr)
+            
+        # Stack and permute back to (B, hidden, T_mel)
+        en = torch.stack(en_list).permute(0, 2, 1).to(self.device)
+        asr = torch.stack(asr_list).permute(0, 2, 1).to(self.device)
 
         # F0 and energy prediction
         F0_pred, N_pred = self.predictor.F0Ntrain(en, s)
-
-        # Text encoder
-        t_en = self.text_encoder(input_ids, input_lengths, text_mask)
-        asr = t_en @ pred_aln_trg
 
         # Decode to audio with ISTFTNet
         audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128]).squeeze()

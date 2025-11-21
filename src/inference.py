@@ -119,29 +119,60 @@ class TTS:
         Args:
             checkpoint_path: Path to checkpoint file
         """
-        # For LoRA models, we need to load from PEFT checkpoint
-        # This is a simplified version - adjust based on actual checkpoint structure
+        # Check if checkpoint is a directory (LoRA) or file (PT)
         checkpoint_path = Path(checkpoint_path)
 
-        if checkpoint_path.is_dir():
-            # Load PEFT model from directory
+        if checkpoint_path.is_dir() or (checkpoint_path.parent / "adapter_config.json").exists():
+            # Load PEFT model (LoRA)
+            print(f"Loading LoRA weights from {checkpoint_path}...")
             from peft import PeftModel
-            # Note: This requires base model to be loaded first
-            # For now, we'll skip actual loading in this simplified version
-            warnings.warn(
-                "Checkpoint loading from directory not fully implemented. "
-                "Using initialized model weights."
-            )
-        elif checkpoint_path.suffix == '.pt':
-            # Load PyTorch checkpoint
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            # Extract model state dict if it exists
-            if 'model_state_dict' in checkpoint:
-                self.model.load_state_dict(checkpoint['model_state_dict'])
-            elif 'state_dict' in checkpoint:
-                self.model.load_state_dict(checkpoint['state_dict'])
+            
+            # If checkpoint_path is a file (e.g. best_model.pt), look for lora directory
+            if checkpoint_path.is_file():
+                # Try to find corresponding LoRA directory
+                # Pattern: checkpoints/best_model.pt -> checkpoints/lora/best_model
+                lora_path = checkpoint_path.parent / 'lora' / checkpoint_path.stem
+                if not lora_path.exists():
+                    # Fallback: try same name in same dir
+                    lora_path = checkpoint_path.parent / checkpoint_path.stem
+                
+                if lora_path.exists():
+                    print(f"Found LoRA weights at {lora_path}")
+                    self.model = PeftModel.from_pretrained(self.model, str(lora_path))
+                else:
+                    warnings.warn(f"LoRA weights not found for {checkpoint_path}. Using random initialization!")
             else:
-                warnings.warn("No model state dict found in checkpoint")
+                # Direct directory path
+                self.model = PeftModel.from_pretrained(self.model, str(checkpoint_path))
+                
+        elif checkpoint_path.suffix == '.pt':
+            # Load PyTorch checkpoint (metadata or full model)
+            print(f"Loading checkpoint metadata from {checkpoint_path}...")
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            
+            # Try to load state dict if available (for full model)
+            if 'model_state_dict' in checkpoint:
+                try:
+                    self.model.load_state_dict(checkpoint['model_state_dict'])
+                    print("Loaded full model state dict")
+                except Exception as e:
+                    print(f"Could not load state dict (expected for LoRA): {e}")
+                    
+            # Look for LoRA weights based on filename
+            # checkpoints/best_model_colab.pt -> checkpoints/lora/best_model
+            # Handle "best_model_colab" -> "best_model" mapping if needed
+            stem = checkpoint_path.stem
+            if stem.endswith('_colab'):
+                stem = stem.replace('_colab', '')
+                
+            lora_path = checkpoint_path.parent / 'lora' / stem
+            
+            if lora_path.exists():
+                print(f"Found LoRA weights at {lora_path}")
+                from peft import PeftModel
+                self.model = PeftModel.from_pretrained(self.model, str(lora_path))
+            else:
+                warnings.warn(f"LoRA weights not found at {lora_path}. Audio will be static/noise!")
 
     def _create_griffin_lim(self) -> torchaudio.transforms.GriffinLim:
         """

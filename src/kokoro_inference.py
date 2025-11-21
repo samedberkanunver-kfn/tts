@@ -32,6 +32,7 @@ import torchaudio
 import json
 
 from .kokoro_model import KokoroModel, KokoroWithLoRA
+from .phonemizer import TurkishPhonemizer
 
 
 class KokoroTTS:
@@ -79,6 +80,15 @@ class KokoroTTS:
         self.vocab = self.config['vocab']
         self.sample_rate = 24000  # Kokoro uses 24kHz
 
+        # Initialize phonemizer
+        print("Initializing Turkish Phonemizer...")
+        self.phonemizer = TurkishPhonemizer()
+        # Load vocab if available in config or default path
+        vocab_path = self.config.get('phonemizer', {}).get('phoneme_vocab_path', 'data/phoneme_vocab.json')
+        if Path(vocab_path).exists():
+            self.phonemizer.load_vocab(vocab_path)
+            print(f"Loaded phoneme vocabulary from {vocab_path}")
+
         # Load base model
         print("Loading Kokoro-82M model...")
         self.model = KokoroModel(
@@ -110,22 +120,13 @@ class KokoroTTS:
         """
         Convert text to IPA phonemes.
 
-        For now, this is a placeholder. You should:
-        1. Use espeak-ng for Turkish G2P
-        2. Map to Kokoro's IPA vocabulary
-
         Args:
             text: Input text
 
         Returns:
             IPA phoneme string
         """
-        # TODO: Implement proper Turkish G2P with espeak-ng
-        # For now, just pass through (works for English)
-
-        # Simple mapping for testing
-        # This is NOT proper phonemization!
-        return text.lower()
+        return self.phonemizer.phonemize(text, normalize=True)
 
     def phonemes_to_tokens(self, phonemes: str) -> torch.LongTensor:
         """

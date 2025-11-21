@@ -11,13 +11,14 @@ Features:
 - Apple Silicon (MPS) support
 - Checkpoint saving
 - TensorBoard logging
+- A100 Optimizations: AMP, TF32, Dynamic Workers
 
 Usage:
     # Debug mode (100 samples)
     python -m src.kokoro_train --limit-samples 100
 
-    # Full training
-    python -m src.kokoro_train
+    # Full training (A100 recommended: batch-size 32-64)
+    python -m src.kokoro_train --batch-size 64
 
 Author: Claude Code
 """
@@ -27,6 +28,7 @@ import warnings
 from pathlib import Path
 from typing import Dict, Optional, Any
 import time
+import os
 
 import json
 import torch
@@ -239,6 +241,9 @@ class KokoroTrainer:
             lr=lr,
             weight_decay=0.01
         )
+        
+        # AMP Scaler for Mixed Precision Training
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
 
         # Mel transform for loss
         self.mel_transform = torchaudio.transforms.MelSpectrogram(
@@ -278,67 +283,64 @@ class KokoroTrainer:
             # Reference style (same for all in batch)
             ref_s = self.voice_embedding.unsqueeze(0).expand(batch_size, -1)
 
-            # Forward
-            try:
-                pred_audio, pred_dur = self.model.model(tokens, ref_s=ref_s, speed=1.0)
-            except Exception as e:
-                print(f"Forward error: {e}")
-                continue
+            # Forward with Mixed Precision
+            with torch.cuda.amp.autocast(enabled=(self.device.type == 'cuda')):
+                try:
+                    pred_audio, pred_dur = self.model.model(tokens, ref_s=ref_s, speed=1.0)
+                except Exception as e:
+                    print(f"Forward error: {e}")
+                    continue
 
-            # Ensure pred_audio is 2D (batch, time)
-            if pred_audio.dim() == 1:
-                pred_audio = pred_audio.unsqueeze(0)
+                # Ensure pred_audio is 2D (batch, time)
+                if pred_audio.dim() == 1:
+                    pred_audio = pred_audio.unsqueeze(0)
 
-            # Debug: print shapes
-            if batch_idx == 0:
-                print(f"\n[DEBUG] Batch {batch_idx}:")
-                print(f"  pred_audio shape: {pred_audio.shape}")
-                print(f"  target_audio shape: {target_audio.shape}")
+                # Debug: print shapes
+                if batch_idx == 0:
+                    print(f"\\n[DEBUG] Batch {batch_idx}:")
+                    print(f"  pred_audio shape: {pred_audio.shape}")
+                    print(f"  target_audio shape: {target_audio.shape}")
 
-            # Align lengths (pad to match target)
-            max_len = target_audio.size(1)
+                # Align lengths (pad to match target)
+                max_len = target_audio.size(1)
 
-            if pred_audio.size(1) < max_len:
-                # Pad predicted
-                pad_len = max_len - pred_audio.size(1)
-                pred_audio = F.pad(pred_audio, (0, pad_len))
-            elif pred_audio.size(1) > max_len:
-                # Truncate predicted
-                pred_audio = pred_audio[:, :max_len]
+                if pred_audio.size(1) < max_len:
+                    # Pad predicted
+                    pad_len = max_len - pred_audio.size(1)
+                    pred_audio = F.pad(pred_audio, (0, pad_len))
+                elif pred_audio.size(1) > max_len:
+                    # Truncate predicted
+                    pred_audio = pred_audio[:, :max_len]
 
-            # Convert to mel
-            pred_mel = self.mel_transform(pred_audio.unsqueeze(1))  # (B, 1, T) → (B, n_mels, T_mel)
-            target_mel = self.mel_transform(target_audio.unsqueeze(1))
+                # Convert to mel
+                pred_mel = self.mel_transform(pred_audio.unsqueeze(1))  # (B, 1, T) → (B, n_mels, T_mel)
+                target_mel = self.mel_transform(target_audio.unsqueeze(1))
 
-            # Debug: print mel shapes
-            if batch_idx == 0:
-                print(f"  pred_mel shape: {pred_mel.shape}")
-                print(f"  target_mel shape: {target_mel.shape}")
+                # Match mel lengths
+                min_mel_len = min(pred_mel.size(2), target_mel.size(2))
+                pred_mel = pred_mel[:, :, :min_mel_len]
+                target_mel = target_mel[:, :, :min_mel_len]
 
-            # Match mel lengths
-            min_mel_len = min(pred_mel.size(2), target_mel.size(2))
-            pred_mel = pred_mel[:, :, :min_mel_len]
-            target_mel = target_mel[:, :, :min_mel_len]
-
-            # Debug: print final mel shapes and check for issues
-            if batch_idx == 0:
-                print(f"  Final pred_mel shape: {pred_mel.shape}")
-                print(f"  Final target_mel shape: {target_mel.shape}")
-                print(f"  pred_mel range: [{pred_mel.min():.4f}, {pred_mel.max():.4f}]")
-                print(f"  target_mel range: [{target_mel.min():.4f}, {target_mel.max():.4f}]")
-
-            # Mel reconstruction loss
-            loss = F.l1_loss(pred_mel, target_mel)
+                # Mel reconstruction loss
+                loss = F.l1_loss(pred_mel, target_mel)
 
             # Debug: print loss
             if batch_idx == 0:
                 print(f"  Loss value: {loss.item():.6f}")
 
-            # Backward
+            # Backward with Scaler
             self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.model.parameters(), 1.0)
-            self.optimizer.step()
+            
+            if self.device.type == 'cuda':
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.model.parameters(), 1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.model.parameters(), 1.0)
+                self.optimizer.step()
 
             # Logging
             total_loss += loss.item()
@@ -356,6 +358,7 @@ class KokoroTrainer:
         """Validate."""
         self.model.eval()
         total_loss = 0.0
+        successful_batches = 0
 
         for batch in tqdm(val_loader, desc="Validating"):
             tokens = batch['tokens'].to(self.device)
@@ -366,7 +369,8 @@ class KokoroTrainer:
 
             try:
                 pred_audio, _ = self.model.model(tokens, ref_s=ref_s, speed=1.0)
-            except:
+            except Exception as e:
+                print(f"Forward error: {e}")
                 continue
 
             if pred_audio.dim() == 1:
@@ -389,8 +393,14 @@ class KokoroTrainer:
 
             loss = F.l1_loss(pred_mel, target_mel)
             total_loss += loss.item()
+            successful_batches += 1
 
-        return total_loss / len(val_loader)
+        # Return previous best loss if no successful batches
+        if successful_batches == 0:
+            print("⚠️ Validation failed - no successful batches!")
+            return float('inf')
+
+        return total_loss / successful_batches
 
     def save_checkpoint(self, path: str):
         """Save LoRA checkpoint."""
@@ -429,6 +439,12 @@ def main():
             device = torch.device('cpu')
 
     print(f"Using device: {device}")
+    
+    # Enable TF32 for A100
+    if device.type == 'cuda':
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("🚀 TF32 enabled for A100 optimization")
 
     # Load config
     with open(args.config, 'r') as f:
@@ -454,12 +470,24 @@ def main():
     )
 
     # Dataloaders
+    # Optimize for CUDA (Colab) vs MPS (Mac)
+    if device.type == 'cuda':
+        # Use all available CPU cores for data loading
+        num_workers = os.cpu_count()
+        pin_memory = True
+    else:
+        num_workers = 0
+        pin_memory = False
+    
+    print(f"DataLoader config: num_workers={num_workers}, pin_memory={pin_memory}")
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=0  # MPS doesn't like multiprocessing
+        num_workers=num_workers,
+        pin_memory=pin_memory
     )
 
     val_loader = DataLoader(
@@ -467,7 +495,8 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=0
+        num_workers=num_workers,
+        pin_memory=pin_memory
     )
 
     # Load model
