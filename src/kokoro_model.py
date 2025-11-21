@@ -191,7 +191,11 @@ class KokoroModel(nn.Module):
         x, _ = self.predictor.lstm(d)
         duration = self.predictor.duration_proj(x)
         duration = torch.sigmoid(duration).sum(axis=-1) / speed
-        pred_dur = torch.round(duration).clamp(min=1).long().squeeze()
+        pred_dur = torch.round(duration).clamp(min=1).long()  # Keep as (B, T), don't squeeze
+        
+        # Ensure pred_dur is 2D (B, T)
+        if pred_dur.dim() == 1:
+            pred_dur = pred_dur.unsqueeze(0)
 
         # Batch alignment (Loop approach to handle variable durations per batch item)
         # This replaces the matrix multiplication approach which failed for batch_size > 1
