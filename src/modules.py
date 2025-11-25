@@ -147,21 +147,30 @@ class DurationEncoder(nn.Module):
 
     def forward(self, x, style, text_lengths, m):
         masks = m
+        # DEBUG: Print input shapes
+        print(f"[DurationEncoder] Input x: {x.shape}, style: {style.shape}")
         x = x.permute(2, 0, 1)  # (B, hidden, T) -> (T, B, hidden)
+        print(f"[DurationEncoder] After permute x: {x.shape}")
         # Fix: style is (B, 128), need to expand to (T, B, 128)
         s = style.unsqueeze(0).expand(x.shape[0], -1, -1)  # (1, B, 128) -> (T, B, 128)
+        print(f"[DurationEncoder] After expand s: {s.shape}")
         x = torch.cat([x, s], axis=-1)  # (T, B, hidden + 128)
+        print(f"[DurationEncoder] After cat x: {x.shape}")
         x.masked_fill_(masks.unsqueeze(-1).transpose(0, 1), 0.0)
         x = x.transpose(0, 1)
         x = x.transpose(-1, -2)
-        for block in self.lstms:
+        for i, block in enumerate(self.lstms):
+            print(f"[DurationEncoder] Loop {i}, block type: {type(block).__name__}, x shape: {x.shape}")
             if isinstance(block, AdaLayerNorm):
                 x = block(x.transpose(-1, -2), style).transpose(-1, -2)
+                print(f"[DurationEncoder] After AdaLayerNorm x: {x.shape}, s.permute: {s.permute(1, 2, 0).shape}")
                 x = torch.cat([x, s.permute(1, 2, 0)], axis=1)
+                print(f"[DurationEncoder] After cat in AdaLayerNorm x: {x.shape}")
                 x.masked_fill_(masks.unsqueeze(-1).transpose(-1, -2), 0.0)
             else:
                 lengths = text_lengths if text_lengths.device == torch.device('cpu') else text_lengths.to('cpu')
                 x = x.transpose(-1, -2)
+                print(f"[DurationEncoder] Before LSTM x: {x.shape}, LSTM input_size: {block.input_size}")
                 x = nn.utils.rnn.pack_padded_sequence(
                     x, lengths, batch_first=True, enforce_sorted=False)
                 block.flatten_parameters()
@@ -173,6 +182,7 @@ class DurationEncoder(nn.Module):
                 x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]], device=x.device)
                 x_pad[:, :, :x.shape[-1]] = x
                 x = x_pad
+                print(f"[DurationEncoder] After LSTM x: {x.shape}")
 
         return x.transpose(-1, -2)
 
