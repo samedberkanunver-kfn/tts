@@ -203,10 +203,10 @@ class KokoroModel(nn.Module):
         
         # Text encoder
         t_en = self.text_encoder(input_ids, input_lengths, text_mask)
-        
-        # d is (B, hidden, T) -> permute to (B, T, hidden) for repeat
-        d_perm = d.permute(0, 2, 1)
-        # t_en is (B, hidden, T) -> permute to (B, T, hidden)
+
+        # d from DurationEncoder is already (B, T, hidden) - NO permute needed!
+        d_perm = d
+        # t_en from TextEncoder is (B, hidden, T) - needs permute to (B, T, hidden)
         t_en_perm = t_en.permute(0, 2, 1)
 
         max_mel_len = int(pred_dur.sum(dim=1).max().item())
