@@ -331,13 +331,17 @@ class KokoroTrainer:
                     # Truncate predicted
                     pred_audio = pred_audio[:, :max_len]
 
-                # Convert to mel (add small epsilon to avoid log(0))
-                pred_mel = self.mel_transform(pred_audio.unsqueeze(1))  # (B, 1, T) → (B, n_mels, T_mel)
-                target_mel = self.mel_transform(target_audio.unsqueeze(1))
+                # Normalize audio to [-1, 1] to prevent mel overflow
+                pred_audio_norm = pred_audio / (pred_audio.abs().max() + 1e-8)
+                target_audio_norm = target_audio / (target_audio.abs().max() + 1e-8)
 
-                # Convert to log-mel (safer than raw power spectrum)
-                pred_mel = torch.log(pred_mel.clamp(min=1e-5))
-                target_mel = torch.log(target_mel.clamp(min=1e-5))
+                # Convert to mel
+                pred_mel = self.mel_transform(pred_audio_norm.unsqueeze(1))  # (B, 1, T) → (B, n_mels, T_mel)
+                target_mel = self.mel_transform(target_audio_norm.unsqueeze(1))
+
+                # Convert to log-mel with clamping to prevent inf
+                pred_mel = torch.log(pred_mel.clamp(min=1e-5, max=1e8))
+                target_mel = torch.log(target_mel.clamp(min=1e-5, max=1e8))
 
                 # Match mel lengths
                 min_mel_len = min(pred_mel.size(2), target_mel.size(2))
@@ -423,13 +427,17 @@ class KokoroTrainer:
             elif pred_audio.size(1) > max_len:
                 pred_audio = pred_audio[:, :max_len]
 
-            # Mel loss (log-mel for consistency with training)
-            pred_mel = self.mel_transform(pred_audio.unsqueeze(1))
-            target_mel = self.mel_transform(target_audio.unsqueeze(1))
+            # Normalize audio to [-1, 1] to prevent mel overflow
+            pred_audio_norm = pred_audio / (pred_audio.abs().max() + 1e-8)
+            target_audio_norm = target_audio / (target_audio.abs().max() + 1e-8)
 
-            # Convert to log-mel
-            pred_mel = torch.log(pred_mel.clamp(min=1e-5))
-            target_mel = torch.log(target_mel.clamp(min=1e-5))
+            # Mel loss (log-mel for consistency with training)
+            pred_mel = self.mel_transform(pred_audio_norm.unsqueeze(1))
+            target_mel = self.mel_transform(target_audio_norm.unsqueeze(1))
+
+            # Convert to log-mel with clamping
+            pred_mel = torch.log(pred_mel.clamp(min=1e-5, max=1e8))
+            target_mel = torch.log(target_mel.clamp(min=1e-5, max=1e8))
 
             min_mel_len = min(pred_mel.size(2), target_mel.size(2))
             pred_mel = pred_mel[:, :, :min_mel_len]
