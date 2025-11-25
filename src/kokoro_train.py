@@ -316,6 +316,13 @@ class KokoroTrainer:
                 if pred_audio.dim() == 1:
                     pred_audio = pred_audio.unsqueeze(0)
 
+                # Limit max audio length to prevent OOM (max 10 seconds at 24kHz)
+                MAX_AUDIO_LEN = 240000  # 10 seconds
+                if pred_audio.size(1) > MAX_AUDIO_LEN:
+                    pred_audio = pred_audio[:, :MAX_AUDIO_LEN]
+                if target_audio.size(1) > MAX_AUDIO_LEN:
+                    target_audio = target_audio[:, :MAX_AUDIO_LEN]
+
                 # Check for inf/nan in model output early
                 if not torch.isfinite(pred_audio).all():
                     print(f"Warning batch {batch_idx}: model output contains inf/nan, skipping")
