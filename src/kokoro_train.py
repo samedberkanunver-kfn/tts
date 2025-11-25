@@ -268,6 +268,7 @@ class KokoroTrainer:
         """Train one epoch."""
         self.model.train()
         total_loss = 0.0
+        successful_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
 
@@ -316,9 +317,13 @@ class KokoroTrainer:
                     # Truncate predicted
                     pred_audio = pred_audio[:, :max_len]
 
-                # Convert to mel
+                # Convert to mel (add small epsilon to avoid log(0))
                 pred_mel = self.mel_transform(pred_audio.unsqueeze(1))  # (B, 1, T) → (B, n_mels, T_mel)
                 target_mel = self.mel_transform(target_audio.unsqueeze(1))
+
+                # Convert to log-mel (safer than raw power spectrum)
+                pred_mel = torch.log(pred_mel.clamp(min=1e-5))
+                target_mel = torch.log(target_mel.clamp(min=1e-5))
 
                 # Match mel lengths
                 min_mel_len = min(pred_mel.size(2), target_mel.size(2))
@@ -327,6 +332,11 @@ class KokoroTrainer:
 
                 # Mel reconstruction loss
                 loss = F.l1_loss(pred_mel, target_mel)
+
+            # Skip if loss is inf/nan
+            if not torch.isfinite(loss):
+                print(f"Skipping batch {batch_idx}: loss is {loss.item()}")
+                continue
 
             # Debug: print loss
             if batch_idx == 0:
@@ -348,6 +358,7 @@ class KokoroTrainer:
 
             # Logging
             total_loss += loss.item()
+            successful_batches += 1
             pbar.set_postfix({'loss': f'{loss.item():.4f}'})
 
             if self.global_step % 10 == 0:
@@ -355,7 +366,9 @@ class KokoroTrainer:
 
             self.global_step += 1
 
-        return total_loss / len(train_loader)
+        if successful_batches == 0:
+            return float('inf')
+        return total_loss / successful_batches
 
     @torch.no_grad()
     def validate(self, val_loader):
@@ -387,15 +400,23 @@ class KokoroTrainer:
             elif pred_audio.size(1) > max_len:
                 pred_audio = pred_audio[:, :max_len]
 
-            # Mel loss
+            # Mel loss (log-mel for consistency with training)
             pred_mel = self.mel_transform(pred_audio.unsqueeze(1))
             target_mel = self.mel_transform(target_audio.unsqueeze(1))
+
+            # Convert to log-mel
+            pred_mel = torch.log(pred_mel.clamp(min=1e-5))
+            target_mel = torch.log(target_mel.clamp(min=1e-5))
 
             min_mel_len = min(pred_mel.size(2), target_mel.size(2))
             pred_mel = pred_mel[:, :, :min_mel_len]
             target_mel = target_mel[:, :, :min_mel_len]
 
             loss = F.l1_loss(pred_mel, target_mel)
+
+            # Skip inf/nan losses
+            if not torch.isfinite(loss):
+                continue
             total_loss += loss.item()
             successful_batches += 1
 
