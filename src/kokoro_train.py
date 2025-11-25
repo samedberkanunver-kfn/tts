@@ -284,7 +284,7 @@ class KokoroTrainer:
             ref_s = self.voice_embedding.unsqueeze(0).expand(batch_size, -1)
 
             # Forward with Mixed Precision
-            with torch.cuda.amp.autocast(enabled=(self.device.type == 'cuda')):
+            with torch.amp.autocast('cuda', enabled=(self.device.type == 'cuda')):
                 try:
                     pred_audio, pred_dur = self.model.model(tokens, ref_s=ref_s, speed=1.0)
                 except Exception as e:

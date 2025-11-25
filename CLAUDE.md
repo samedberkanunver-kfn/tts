@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Turkish Text-to-Speech fine-tuning using simplified StyleTTS2 with LoRA. Optimized for Apple Silicon (MPS), supports CUDA/CPU.
+Turkish Text-to-Speech fine-tuning using **Kokoro-82M** (primary) or simplified StyleTTS2 with LoRA. Optimized for CUDA (A100/GCP) and Apple Silicon (MPS).
 
 **Key Points:**
-- Simplified StyleTTS2 (NOT production-ready - missing diffusion, style encoder)
-- PEFT LoRA fine-tuning (r=8, alpha=16)
-- Dataset: zeynepgulhan/mediaspeech-with-cv-tr (48k samples)
+- **Kokoro-82M**: Pretrained 82M param model from hexgrad/Kokoro-82M
+- PEFT LoRA fine-tuning (r=8, alpha=16, ~109K trainable params)
+- Dataset: zeynepgulhan/mediaspeech-with-cv-tr (48k Turkish samples)
 - Turkish phonemization via espeak-ng
-- Griffin-Lim vocoder (low quality - use HiFi-GAN for production)
+- ISTFTNet vocoder (built into Kokoro)
 
 ## Commands
 
@@ -19,20 +19,23 @@ Turkish Text-to-Speech fine-tuning using simplified StyleTTS2 with LoRA. Optimiz
 # Setup
 source venv/bin/activate
 pip install -r requirements.txt
-brew install espeak-ng  # Required system dependency
 
-# Test components
-python -m src.phonemizer
-python -m src.dataset
+# System dependency (REQUIRED)
+# Linux (GCP):
+sudo apt-get install -y espeak-ng
+# macOS:
+brew install espeak-ng
 
-# Training
-python -m src.train --config config.yaml                    # Full training
-python -m src.train --config config.yaml --limit-samples 100  # Debug mode
-python -m src.train --config config.yaml --resume checkpoints/checkpoint_step_5000.pt
+# Kokoro Training (RECOMMENDED)
+python -m src.kokoro_train --epochs 20 --batch-size 4           # GCP A100
+python -m src.kokoro_train --epochs 10 --batch-size 2           # MPS/smaller GPU
+python -m src.kokoro_train --limit-samples 100 --epochs 2       # Debug mode
 
-# Inference
-python -m src.inference --checkpoint checkpoints/best_model.pt --text "Merhaba dünya"
-python -m src.inference --checkpoint checkpoints/best_model.pt --input texts.txt --output outputs/
+# Kokoro Inference
+python -m src.kokoro_inference --checkpoint checkpoints/kokoro_lora/best_model --text "Merhaba"
+
+# Legacy StyleTTS2 Training (simplified, lower quality)
+python -m src.train --config config.yaml
 
 # Monitoring
 tensorboard --logdir runs/
@@ -40,55 +43,120 @@ tensorboard --logdir runs/
 
 ## Architecture
 
-### Pipeline: Text → Phonemes → Mel-spectrogram → Audio
+### Kokoro-82M Pipeline (Primary)
 
-1. **src/phonemizer.py** (`TurkishPhonemizer`): Text normalization and phoneme conversion
-   - Turkish lowercase (I→ı, İ→i), number expansion, abbreviations
-   - Vocabulary: `<PAD>=0, <UNK>=1, <BOS>=2, <EOS>=3` + phonemes
-   - Key functions: `phonemize()`, `encode()`, `decode()`, `build_vocab_from_texts()`
+```
+Text → TurkishPhonemizer → IPA → Kokoro Token IDs → Model → Audio
+                ↓
+        espeak-ng backend
+```
 
-2. **src/dataset.py** (`TurkishTTSDataset`, `TTSCollator`): Data loading
-   - Filters: 3-20 words, 0.5-15s audio duration
-   - Resamples to 24kHz, converts to 80-bin log mel-spectrogram
-   - Batch keys: `phoneme_ids`, `phoneme_lengths`, `mel`, `mel_lengths`, `speaker_ids`
+**Model Components** (`src/kokoro_model.py`):
+1. **CustomAlbert** (BERT): Phoneme encoding (768-dim, 12 layers)
+2. **bert_encoder**: Linear projection (768 → 512)
+3. **ProsodyPredictor**: Duration, F0, energy prediction
+4. **TextEncoder**: Text feature extraction (CNN + LSTM)
+5. **Decoder**: ISTFTNet vocoder (mel → audio)
 
-3. **src/model.py** (`SimplifiedStyleTTS2`, `StyleTTS2WithLoRA`): Model
-   - TextEncoder: Embedding → Positional Encoding → Transformer Encoder
-   - AcousticModel: Transformer Decoder with cross-attention → Mel projection
-   - LoRA auto-detects all Linear modules via PEFT
+**Training Flow** (`src/kokoro_train.py`):
+1. Load pretrained Kokoro-82M from `models/kokoro-82m/kokoro-v1_0.pth`
+2. Apply LoRA to BERT attention layers
+3. Freeze base model, train only LoRA adapters
+4. Loss: L1 mel-spectrogram reconstruction
 
-4. **src/train.py** (`Trainer`): Training loop
-   - Gradient accumulation, masked L1/MSE loss, early stopping
-   - Checkpoints: `checkpoints/*.pt` (metadata), `checkpoints/lora/*/` (LoRA weights)
+### File Structure
 
-5. **src/inference.py** (`TTS`): Generation
-   - Loads phoneme vocab + LoRA weights
-   - Uses librosa Griffin-Lim for mel→audio conversion
+```
+src/
+├── kokoro_train.py      # Main training script (Kokoro)
+├── kokoro_model.py      # KokoroModel + KokoroWithLoRA wrapper
+├── kokoro_inference.py  # Inference with trained LoRA
+├── modules.py           # CustomAlbert, ProsodyPredictor, TextEncoder, DurationEncoder
+├── istftnet.py          # Decoder with ISTFTNet vocoder
+├── custom_stft.py       # ONNX-compatible STFT implementation
+├── phonemizer.py        # TurkishPhonemizer (espeak-ng)
+├── dataset.py           # Legacy dataset loader
+├── model.py             # Legacy SimplifiedStyleTTS2
+├── train.py             # Legacy training script
+└── inference.py         # Legacy inference
 
-### LoRA Details
+models/kokoro-82m/
+├── config.json          # Model architecture config
+├── kokoro-v1_0.pth      # Pretrained weights (327MB)
+└── voices/
+    └── af_heart.pt      # Voice embedding for inference
 
-- Base model frozen, only LoRA adapters trained
-- Weights saved separately in `checkpoints/lora/{checkpoint_name}/`
-- Loading: metadata from `.pt` file, LoRA from corresponding `lora/` directory
+checkpoints/kokoro_lora/
+└── best_model/          # LoRA weights (saved by trainer)
+```
 
-## Configuration (config.yaml)
+## Configuration
 
-Key sections:
-- `data`: dataset_name, sample_rate (24000), n_mels (80), filtering thresholds
-- `model`: hidden_dim (512), n_layer (8)
-- `lora`: r (8), lora_alpha (16), target_modules
-- `training`: device, batch_size, learning_rate, mixed_precision, early_stopping
+### Kokoro Config (`models/kokoro-82m/config.json`)
+- `hidden_dim`: 512
+- `style_dim`: 128
+- `n_layer`: 3
+- `n_token`: 178 (IPA vocab size)
+- `plbert.hidden_size`: 768 (BERT dimension)
+- `plbert.num_hidden_layers`: 12
 
-## Critical Warnings
+### LoRA Config (in `kokoro_train.py`)
+- `r`: 8 (rank)
+- `lora_alpha`: 16
+- `lora_dropout`: 0.1
+- Target modules: query, key, value, dense, ffn, bert_encoder
 
-1. **espeak-ng**: Must install system-wide (`brew install espeak-ng`), Python package alone fails
-2. **MPS AMP**: Mixed precision unreliable on Apple Silicon - set `mixed_precision: false` if crashes
-3. **Memory**: Use batch_size=1-2 on M4, increase gradient_accumulation_steps instead
-4. **Production**: Use official StyleTTS2 repo + HiFi-GAN vocoder for real applications
+## Critical Dependencies
+
+### System
+```bash
+# Linux (GCP/Ubuntu)
+sudo apt-get install -y espeak-ng libespeak-ng1
+
+# macOS
+brew install espeak-ng
+
+# Verify
+espeak-ng --version
+```
+
+### Python
+```
+torch>=2.0.0
+torchaudio>=2.0.0
+transformers>=4.30.0
+peft>=0.5.0
+datasets>=2.14.0
+phonemizer>=3.2.0
+```
 
 ## Troubleshooting
 
-- **OOM on MPS**: Reduce batch_size, disable mixed_precision, increase gradient_accumulation_steps
-- **espeak-ng errors**: Verify `espeak-ng --version` works, reinstall if needed
-- **Quick iteration**: Use `--limit-samples 100` for fast pipeline testing
-- **Training time**: Full dataset on M4 = 7-14 days; use cloud GPU for speed
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `espeak-ng backend failed` | espeak-ng not installed | `sudo apt-get install espeak-ng` |
+| `Expected 640, got 512` | DurationEncoder shape bug | Fixed in modules.py (unsqueeze style) |
+| `FileNotFoundError: kokoro-v1_0.pth` | Model not downloaded | Download from HuggingFace |
+| `CUDA OOM` | Batch size too large | Reduce `--batch-size` |
+| `num_workers error` | DataLoader issue | Set `num_workers=0` |
+
+## Device-Specific
+
+**GCP A100 (CUDA)**:
+- batch_size: 32-64
+- Mixed precision: enabled (AMP + TF32)
+- num_workers: os.cpu_count()
+
+**Apple Silicon (MPS)**:
+- batch_size: 2-4
+- Mixed precision: experimental
+- num_workers: 0
+
+## Model Downloads
+
+Kokoro-82M pretrained model:
+```bash
+# Manual download from HuggingFace
+# https://huggingface.co/hexgrad/Kokoro-82M
+# Place files in models/kokoro-82m/
+```
