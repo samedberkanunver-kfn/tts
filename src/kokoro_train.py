@@ -93,11 +93,19 @@ class KokoroTurkishDataset(Dataset):
         if limit_samples:
             dataset = dataset.select(range(min(limit_samples, len(dataset))))
 
-        # Filter by text length (avoid very short/long)
+        # Filter by text length and audio duration (avoid very short/long)
         def filter_fn(example):
             words = example['sentence'].split()
-            # Relaxed filtering: 2-30 words (was 3-20)
-            return 2 <= len(words) <= 30
+            # Text: 2-30 words
+            if not (2 <= len(words) <= 30):
+                return False
+            # Audio: 0.5s - 15s (at any sample rate)
+            audio_len = len(example['audio']['array'])
+            sr = example['audio']['sampling_rate']
+            duration = audio_len / sr
+            if not (0.5 <= duration <= 15.0):
+                return False
+            return True
 
         dataset = dataset.filter(filter_fn)
 
@@ -300,6 +308,12 @@ class KokoroTrainer:
                 if pred_audio.dim() == 1:
                     pred_audio = pred_audio.unsqueeze(0)
 
+                # Check for inf/nan in model output early
+                if not torch.isfinite(pred_audio).all():
+                    print(f"Warning batch {batch_idx}: model output contains inf/nan, skipping")
+                    self.optimizer.zero_grad()
+                    continue
+
                 # Debug: print shapes
                 if batch_idx == 0:
                     print(f"\\n[DEBUG] Batch {batch_idx}:")
@@ -333,9 +347,16 @@ class KokoroTrainer:
                 # Mel reconstruction loss
                 loss = F.l1_loss(pred_mel, target_mel)
 
-            # Skip if loss is inf/nan
+            # Skip if loss is inf/nan - debug why
             if not torch.isfinite(loss):
-                print(f"Skipping batch {batch_idx}: loss is {loss.item()}")
+                # Debug: find the source of inf
+                has_inf_audio = not torch.isfinite(pred_audio).all()
+                has_inf_mel = not torch.isfinite(pred_mel).all()
+                print(f"Skipping batch {batch_idx}: loss={loss.item():.2f}, "
+                      f"inf_in_audio={has_inf_audio}, inf_in_mel={has_inf_mel}, "
+                      f"audio_len={target_audio.size(1)}")
+                # Clear any bad gradients
+                self.optimizer.zero_grad()
                 continue
 
             # Debug: print loss
