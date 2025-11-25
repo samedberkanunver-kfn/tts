@@ -350,11 +350,13 @@ class KokoroTrainer:
             # Skip if loss is inf/nan - debug why
             if not torch.isfinite(loss):
                 # Debug: find the source of inf
-                has_inf_audio = not torch.isfinite(pred_audio).all()
-                has_inf_mel = not torch.isfinite(pred_mel).all()
+                has_inf_pred = not torch.isfinite(pred_mel).all()
+                has_inf_target = not torch.isfinite(target_mel).all()
+                target_min = target_mel.min().item()
+                target_max = target_mel.max().item()
                 print(f"Skipping batch {batch_idx}: loss={loss.item():.2f}, "
-                      f"inf_in_audio={has_inf_audio}, inf_in_mel={has_inf_mel}, "
-                      f"audio_len={target_audio.size(1)}")
+                      f"inf_pred={has_inf_pred}, inf_target={has_inf_target}, "
+                      f"target_range=[{target_min:.2f}, {target_max:.2f}]")
                 # Clear any bad gradients
                 self.optimizer.zero_grad()
                 continue
