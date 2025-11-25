@@ -96,14 +96,14 @@ class KokoroTurkishDataset(Dataset):
         # Filter by text length and audio duration (avoid very short/long)
         def filter_fn(example):
             words = example['sentence'].split()
-            # Text: 2-15 words (shorter to reduce predicted audio length)
-            if not (2 <= len(words) <= 15):
+            # Text: 2-10 words (shorter to reduce predicted audio length)
+            if not (2 <= len(words) <= 10):
                 return False
-            # Audio: 0.5s - 8s (shorter samples to prevent OOM)
+            # Audio: 0.5s - 5s (shorter samples to prevent OOM)
             audio_len = len(example['audio']['array'])
             sr = example['audio']['sampling_rate']
             duration = audio_len / sr
-            if not (0.5 <= duration <= 8.0):
+            if not (0.5 <= duration <= 5.0):
                 return False
             return True
 
@@ -316,8 +316,8 @@ class KokoroTrainer:
                 if pred_audio.dim() == 1:
                     pred_audio = pred_audio.unsqueeze(0)
 
-                # Limit max audio length to prevent OOM (max 10 seconds at 24kHz)
-                MAX_AUDIO_LEN = 240000  # 10 seconds
+                # Limit max audio length to prevent OOM (max 5 seconds at 24kHz)
+                MAX_AUDIO_LEN = 120000  # 5 seconds
                 if pred_audio.size(1) > MAX_AUDIO_LEN:
                     pred_audio = pred_audio[:, :MAX_AUDIO_LEN]
                 if target_audio.size(1) > MAX_AUDIO_LEN:
