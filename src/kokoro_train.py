@@ -96,14 +96,14 @@ class KokoroTurkishDataset(Dataset):
         # Filter by text length and audio duration (avoid very short/long)
         def filter_fn(example):
             words = example['sentence'].split()
-            # Text: 2-30 words
-            if not (2 <= len(words) <= 30):
+            # Text: 2-15 words (shorter to reduce predicted audio length)
+            if not (2 <= len(words) <= 15):
                 return False
-            # Audio: 0.5s - 15s (at any sample rate)
+            # Audio: 0.5s - 8s (shorter samples to prevent OOM)
             audio_len = len(example['audio']['array'])
             sr = example['audio']['sampling_rate']
             duration = audio_len / sr
-            if not (0.5 <= duration <= 15.0):
+            if not (0.5 <= duration <= 8.0):
                 return False
             return True
 
@@ -190,8 +190,8 @@ def collate_fn(batch):
     tokens = [item['tokens'] for item in batch]
     audios = [item['audio'] for item in batch]
 
-    # Pad tokens to fixed length (reduced from 512 to 256 for memory efficiency)
-    FIXED_TOKEN_LEN = 256
+    # Pad tokens to fixed length (reduced to 128 for memory efficiency)
+    FIXED_TOKEN_LEN = 128
     tokens_padded = torch.zeros(len(tokens), FIXED_TOKEN_LEN, dtype=torch.long)
     token_lengths = torch.LongTensor([min(len(t), FIXED_TOKEN_LEN) for t in tokens])
 
