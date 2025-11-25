@@ -289,6 +289,14 @@ class KokoroTrainer:
 
             batch_size = tokens.size(0)
 
+            # Check for inf/nan in raw target audio
+            if not torch.isfinite(target_audio).all():
+                print(f"Skipping batch {batch_idx}: raw target_audio contains inf/nan")
+                continue
+
+            # Normalize target audio early (before any processing)
+            target_audio = target_audio / (target_audio.abs().max() + 1e-8)
+
             # Reference style (same for all in batch)
             ref_s = self.voice_embedding.unsqueeze(0).expand(batch_size, -1)
 
@@ -331,17 +339,17 @@ class KokoroTrainer:
                     # Truncate predicted
                     pred_audio = pred_audio[:, :max_len]
 
-                # Normalize audio to [-1, 1] to prevent mel overflow
+                # Normalize pred_audio
                 pred_audio_norm = pred_audio / (pred_audio.abs().max() + 1e-8)
-                target_audio_norm = target_audio / (target_audio.abs().max() + 1e-8)
 
-                # Convert to mel
-                pred_mel = self.mel_transform(pred_audio_norm.unsqueeze(1))  # (B, 1, T) → (B, n_mels, T_mel)
-                target_mel = self.mel_transform(target_audio_norm.unsqueeze(1))
+                # Convert to mel in float32 (outside autocast to prevent overflow)
+                with torch.amp.autocast('cuda', enabled=False):
+                    pred_mel = self.mel_transform(pred_audio_norm.float().unsqueeze(1))
+                    target_mel = self.mel_transform(target_audio.float().unsqueeze(1))
 
-                # Convert to log-mel with clamping to prevent inf
-                pred_mel = torch.log(pred_mel.clamp(min=1e-5, max=1e8))
-                target_mel = torch.log(target_mel.clamp(min=1e-5, max=1e8))
+                    # Convert to log-mel with clamping
+                    pred_mel = torch.log(pred_mel.clamp(min=1e-5, max=1e8))
+                    target_mel = torch.log(target_mel.clamp(min=1e-5, max=1e8))
 
                 # Match mel lengths
                 min_mel_len = min(pred_mel.size(2), target_mel.size(2))
@@ -431,9 +439,9 @@ class KokoroTrainer:
             pred_audio_norm = pred_audio / (pred_audio.abs().max() + 1e-8)
             target_audio_norm = target_audio / (target_audio.abs().max() + 1e-8)
 
-            # Mel loss (log-mel for consistency with training)
-            pred_mel = self.mel_transform(pred_audio_norm.unsqueeze(1))
-            target_mel = self.mel_transform(target_audio_norm.unsqueeze(1))
+            # Mel loss in float32 (prevent overflow)
+            pred_mel = self.mel_transform(pred_audio_norm.float().unsqueeze(1))
+            target_mel = self.mel_transform(target_audio_norm.float().unsqueeze(1))
 
             # Convert to log-mel with clamping
             pred_mel = torch.log(pred_mel.clamp(min=1e-5, max=1e8))
