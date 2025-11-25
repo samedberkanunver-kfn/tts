@@ -308,6 +308,10 @@ class KokoroWithLoRA:
             print(f"Moving model to {device}...")
             self.base_model = self.base_model.to(device)
 
+        # Enable gradient checkpointing for BERT to save memory
+        print("Enabling gradient checkpointing for BERT...")
+        self.base_model.bert.gradient_checkpointing_enable()
+
         # Apply LoRA
         print("\n" + "="*60)
         print("Applying LoRA with PEFT...")

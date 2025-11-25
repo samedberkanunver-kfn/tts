@@ -182,8 +182,8 @@ def collate_fn(batch):
     tokens = [item['tokens'] for item in batch]
     audios = [item['audio'] for item in batch]
 
-    # Pad tokens to fixed length (BERT expects 512)
-    FIXED_TOKEN_LEN = 512
+    # Pad tokens to fixed length (reduced from 512 to 256 for memory efficiency)
+    FIXED_TOKEN_LEN = 256
     tokens_padded = torch.zeros(len(tokens), FIXED_TOKEN_LEN, dtype=torch.long)
     token_lengths = torch.LongTensor([min(len(t), FIXED_TOKEN_LEN) for t in tokens])
 
@@ -287,8 +287,12 @@ class KokoroTrainer:
             with torch.amp.autocast('cuda', enabled=(self.device.type == 'cuda')):
                 try:
                     pred_audio, pred_dur = self.model.model(tokens, ref_s=ref_s, speed=1.0)
-                except Exception as e:
-                    print(f"Forward error: {e}")
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        torch.cuda.empty_cache()
+                        print(f"OOM error, clearing cache and skipping batch")
+                    else:
+                        print(f"Forward error: {e}")
                     continue
 
                 # Ensure pred_audio is 2D (batch, time)
@@ -420,7 +424,7 @@ def main():
     parser.add_argument('--config', type=str, default='models/kokoro-82m/config.json')
     parser.add_argument('--voice', type=str, default='models/kokoro-82m/voices/af_heart.pt')
     parser.add_argument('--limit-samples', type=int, default=None)
-    parser.add_argument('--batch-size', type=int, default=2)
+    parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--device', type=str, default=None)
