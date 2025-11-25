@@ -4,219 +4,91 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Turkish Text-to-Speech (TTS) fine-tuning project that adapts a StyleTTS2-based model for Turkish language using LoRA (Low-Rank Adaptation). The project is optimized for Apple Silicon (MPS) devices, specifically MacBook Pro M4, though it supports CUDA and CPU as well.
+Turkish Text-to-Speech fine-tuning using simplified StyleTTS2 with LoRA. Optimized for Apple Silicon (MPS), supports CUDA/CPU.
 
-**Key Technical Points:**
-- Uses simplified StyleTTS2 architecture (NOT production-ready; see src/model.py notes)
-- PEFT LoRA for parameter-efficient fine-tuning (r=8, alpha=16)
-- Dataset: zeynepgulhan/mediaspeech-with-cv-tr (48,781 Turkish audio samples)
-- Turkish phonemization via espeak-ng backend
-- Mixed precision (FP16) training on MPS
+**Key Points:**
+- Simplified StyleTTS2 (NOT production-ready - missing diffusion, style encoder)
+- PEFT LoRA fine-tuning (r=8, alpha=16)
+- Dataset: zeynepgulhan/mediaspeech-with-cv-tr (48k samples)
+- Turkish phonemization via espeak-ng
+- Griffin-Lim vocoder (low quality - use HiFi-GAN for production)
 
-## Development Commands
+## Commands
 
-### Environment Setup
 ```bash
-# Activate virtual environment
+# Setup
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
+brew install espeak-ng  # Required system dependency
 
-# Install espeak-ng (required for phonemization)
-brew install espeak-ng
-
-# Verify espeak-ng installation
-espeak-ng --version
-```
-
-### Testing Individual Components
-```bash
-# Test phonemizer
+# Test components
 python -m src.phonemizer
-
-# Test dataset loading
 python -m src.dataset
 
-# Test model initialization
-python -c "import yaml; from src.model import create_model_from_config; config = yaml.safe_load(open('config.yaml')); create_model_from_config(config, vocab_size=100, device='cpu')"
-```
-
-### Training
-```bash
-# Full training (48k samples, ~100 epochs)
-python -m src.train --config config.yaml
-
-# Debug mode (100 samples)
-python -m src.train --config config.yaml --limit-samples 100
-
-# Resume from checkpoint
+# Training
+python -m src.train --config config.yaml                    # Full training
+python -m src.train --config config.yaml --limit-samples 100  # Debug mode
 python -m src.train --config config.yaml --resume checkpoints/checkpoint_step_5000.pt
 
-# Monitor training with TensorBoard
+# Inference
+python -m src.inference --checkpoint checkpoints/best_model.pt --text "Merhaba dünya"
+python -m src.inference --checkpoint checkpoints/best_model.pt --input texts.txt --output outputs/
+
+# Monitoring
 tensorboard --logdir runs/
-```
-
-### Inference
-```bash
-# Generate speech from text
-python -m src.inference \
-  --checkpoint checkpoints/best_model.pt \
-  --text "Merhaba, size nasıl yardımcı olabilirim?"
-
-# Batch inference from file
-python -m src.inference \
-  --checkpoint checkpoints/best_model.pt \
-  --input texts.txt \
-  --output outputs/
 ```
 
 ## Architecture
 
-### Core Pipeline Flow
-1. **Text → Phonemes** (src/phonemizer.py): Turkish text normalized and converted to phonemes via espeak-ng
-2. **Phonemes → IDs** (src/phonemizer.py): Phonemes encoded to integer indices using built vocabulary
-3. **Audio → Mel-spectrograms** (src/dataset.py): Audio resampled to 24kHz and converted to 80-bin mel-spectrograms
-4. **Training** (src/train.py): Model learns phoneme → mel mapping using L1/MSE loss
-5. **Inference** (src/inference.py): Text → phonemes → mel → audio (via vocoder)
+### Pipeline: Text → Phonemes → Mel-spectrogram → Audio
 
-### Module Responsibilities
+1. **src/phonemizer.py** (`TurkishPhonemizer`): Text normalization and phoneme conversion
+   - Turkish lowercase (I→ı, İ→i), number expansion, abbreviations
+   - Vocabulary: `<PAD>=0, <UNK>=1, <BOS>=2, <EOS>=3` + phonemes
+   - Key functions: `phonemize()`, `encode()`, `decode()`, `build_vocab_from_texts()`
 
-**src/phonemizer.py**: Turkish-specific text processing
-- Handles Turkish lowercase (I→ı, İ→i conversion)
-- Number expansion (123 → "yüz yirmi üç")
-- Abbreviation expansion (Dr. → Doktor)
-- Phoneme vocabulary building and encoding/decoding
-- Special tokens: `<PAD>`, `<UNK>`, `<BOS>`, `<EOS>`
+2. **src/dataset.py** (`TurkishTTSDataset`, `TTSCollator`): Data loading
+   - Filters: 3-20 words, 0.5-15s audio duration
+   - Resamples to 24kHz, converts to 80-bin log mel-spectrogram
+   - Batch keys: `phoneme_ids`, `phoneme_lengths`, `mel`, `mel_lengths`, `speaker_ids`
 
-**src/dataset.py**: Data loading and preprocessing
-- Loads Hugging Face datasets with automatic caching
-- Filters by text length (3-20 words) and audio duration (0.5-15s)
-- Resamples audio to 24kHz mono
-- Converts audio to log mel-spectrograms
-- Handles variable-length sequences with padding in TTSCollator
-- Multi-speaker support (checks for 'speaker_id' field)
+3. **src/model.py** (`SimplifiedStyleTTS2`, `StyleTTS2WithLoRA`): Model
+   - TextEncoder: Embedding → Positional Encoding → Transformer Encoder
+   - AcousticModel: Transformer Decoder with cross-attention → Mel projection
+   - LoRA auto-detects all Linear modules via PEFT
 
-**src/model.py**: Simplified StyleTTS2 with LoRA
-- TextEncoder: Phoneme embeddings → transformer → text features
-- AcousticModel: Text features → mel-spectrograms
-- LoRA applied to attention layers (q_proj, k_proj, v_proj, o_proj)
-- Uses Hugging Face PEFT library
-- **IMPORTANT**: This is simplified; production requires full StyleTTS2 from official repo
+4. **src/train.py** (`Trainer`): Training loop
+   - Gradient accumulation, masked L1/MSE loss, early stopping
+   - Checkpoints: `checkpoints/*.pt` (metadata), `checkpoints/lora/*/` (LoRA weights)
 
-**src/train.py**: Training loop and optimization
-- Gradient accumulation (effective batch size: batch_size × gradient_accumulation_steps)
-- Mixed precision training with torch.cuda.amp (limited MPS support)
-- Learning rate scheduling (linear warmup)
-- Early stopping with validation loss monitoring
-- Checkpoint management (keeps only last N checkpoints)
-- TensorBoard logging for loss/learning rate
-- Masked loss computation for variable-length sequences
+5. **src/inference.py** (`TTS`): Generation
+   - Loads phoneme vocab + LoRA weights
+   - Uses librosa Griffin-Lim for mel→audio conversion
 
-### LoRA Integration Details
+### LoRA Details
 
-LoRA weights are separate from base model:
-- Base model frozen (requires_grad=False)
-- Only LoRA adapters trained (q_proj, k_proj, v_proj, o_proj)
-- Saved separately in `checkpoints/lora/` directory
-- Loading requires both base model + LoRA weights
+- Base model frozen, only LoRA adapters trained
+- Weights saved separately in `checkpoints/lora/{checkpoint_name}/`
+- Loading: metadata from `.pt` file, LoRA from corresponding `lora/` directory
 
-To use trained model:
-1. Load base StyleTTS2 model
-2. Apply LoRA weights from checkpoint
-3. Model is in eval mode for inference
+## Configuration (config.yaml)
 
-### Data Format Expectations
+Key sections:
+- `data`: dataset_name, sample_rate (24000), n_mels (80), filtering thresholds
+- `model`: hidden_dim (512), n_layer (8)
+- `lora`: r (8), lora_alpha (16), target_modules
+- `training`: device, batch_size, learning_rate, mixed_precision, early_stopping
 
-**Dataset structure** (zeynepgulhan/mediaspeech-with-cv-tr):
-- `sentence`: Turkish text string
-- `audio`: Dict with `array` (waveform) and `sampling_rate`
-- Optional `speaker_id`: Speaker identifier for multi-speaker training
+## Critical Warnings
 
-**Batch structure** (after collation):
-- `phoneme_ids`: Padded tensor (B, max_phoneme_len)
-- `phoneme_lengths`: Original lengths (B,)
-- `mel`: Padded mel-spectrograms (B, n_mels, max_mel_len)
-- `mel_lengths`: Original mel lengths (B,)
-- `speaker_ids`: Speaker indices (B,)
+1. **espeak-ng**: Must install system-wide (`brew install espeak-ng`), Python package alone fails
+2. **MPS AMP**: Mixed precision unreliable on Apple Silicon - set `mixed_precision: false` if crashes
+3. **Memory**: Use batch_size=1-2 on M4, increase gradient_accumulation_steps instead
+4. **Production**: Use official StyleTTS2 repo + HiFi-GAN vocoder for real applications
 
-### Configuration System
+## Troubleshooting
 
-All hyperparameters controlled via `config.yaml`:
-- `data`: Dataset name, sample rate, mel-spectrogram params, filtering thresholds
-- `phonemizer`: espeak-ng settings, vocabulary path
-- `model`: Architecture dimensions, layer counts, speaker embedding
-- `lora`: Rank, alpha, dropout, target modules
-- `training`: Batch size, learning rate, epochs, device (mps/cuda/cpu), mixed precision
-- `validation`: Sample generation during validation
-- `system`: Random seed, num_workers
-
-## Common Development Patterns
-
-### Adding New Dataset
-1. Update `config.yaml` → `data.dataset_name`
-2. Ensure dataset has `sentence` and `audio` fields
-3. Rebuild phoneme vocabulary: `build_phoneme_vocab_from_dataset()`
-4. Adjust filtering thresholds in config if needed
-
-### Modifying LoRA Configuration
-1. Edit `config.yaml` → `lora` section
-2. Change `r` (rank) for capacity vs. parameter tradeoff
-3. Modify `target_modules` to include/exclude layers
-4. Delete old checkpoints when changing architecture
-
-### Debugging Training Issues
-1. Use `--limit-samples 100` to test pipeline quickly
-2. Check TensorBoard for loss curves: `tensorboard --logdir runs/`
-3. Verify device usage: Look for "Using device: mps/cuda/cpu" in logs
-4. Monitor memory: Reduce `batch_size` or disable `mixed_precision` if OOM
-5. Check gradient flow: Enable gradient logging in trainer
-
-### Memory Optimization for Apple Silicon
-- Default batch_size=2 with gradient_accumulation_steps=16
-- Mixed precision may not work reliably on MPS (set `mixed_precision: false` if errors)
-- Set `num_workers: 4` for data loading (good balance for M4)
-- Disable `pin_memory` (not useful for MPS)
-
-## Known Limitations and Warnings
-
-1. **Simplified Model**: This is NOT production StyleTTS2. Missing diffusion model, style encoder, adversarial training. For real TTS, use https://github.com/yl4579/StyleTTS2
-
-2. **Vocoder**: Uses basic Griffin-Lim reconstruction (poor quality). For production, integrate HiFi-GAN or similar neural vocoder.
-
-3. **MPS Mixed Precision**: Apple MPS has limited autocast support. If training crashes with AMP enabled, set `mixed_precision: false` in config.
-
-4. **Multi-speaker**: Dataset may not have explicit speaker IDs. Current implementation defaults to single speaker.
-
-5. **espeak-ng Dependency**: Must be installed system-wide (`brew install espeak-ng`). Python package alone won't work.
-
-6. **Training Time**: Full 48k samples on M4 takes 7-14 days. For faster iteration, use `--limit-samples` or cloud GPU.
-
-## File Locations
-
-- **Source code**: `src/`
-- **Configuration**: `config.yaml`
-- **Checkpoints**: `checkpoints/` (LoRA weights in `checkpoints/lora/`)
-- **Generated audio**: `outputs/`
-- **TensorBoard logs**: `runs/`
-- **Dataset cache**: `data/cache/`
-- **Phoneme vocabulary**: `data/phoneme_vocab.json` (auto-generated)
-
-## Device-Specific Notes
-
-**Apple Silicon (MPS)**:
-- Set `device: "mps"` in config
-- Use batch_size=1-2 (limited memory)
-- Mixed precision is experimental
-- Training speed: ~10-15 samples/sec on M4
-
-**NVIDIA GPU (CUDA)**:
-- Set `device: "cuda"` in config
-- Can increase batch_size to 8-16
-- Mixed precision highly recommended
-- Training speed: ~50-100 samples/sec on RTX 3090
-
-**CPU**:
-- Set `device: "cpu"` in config
-- Very slow, not recommended except for debugging
-- Reduce batch_size to 1
+- **OOM on MPS**: Reduce batch_size, disable mixed_precision, increase gradient_accumulation_steps
+- **espeak-ng errors**: Verify `espeak-ng --version` works, reinstall if needed
+- **Quick iteration**: Use `--limit-samples 100` for fast pipeline testing
+- **Training time**: Full dataset on M4 = 7-14 days; use cloud GPU for speed

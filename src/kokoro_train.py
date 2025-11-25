@@ -182,8 +182,8 @@ def collate_fn(batch):
     tokens = [item['tokens'] for item in batch]
     audios = [item['audio'] for item in batch]
 
-    # Pad tokens to fixed length (BERT expects 640)
-    FIXED_TOKEN_LEN = 640
+    # Pad tokens to fixed length (BERT expects 512)
+    FIXED_TOKEN_LEN = 512
     tokens_padded = torch.zeros(len(tokens), FIXED_TOKEN_LEN, dtype=torch.long)
     token_lengths = torch.LongTensor([min(len(t), FIXED_TOKEN_LEN) for t in tokens])
 
